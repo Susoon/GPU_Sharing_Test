@@ -5,30 +5,19 @@
 #include <time.h>
 #include <pthread.h>
 #include "gpu_spec.h"
-#include "gpu_info.h"
 
-#define N (1024 * 16)
+#define N 10000
 #define BLOCK_SIZE 16
 #define PART 4
-#define GRID_SIZE 11
+#define TERM (N + BLOCK_SIZE * 11 - 1) / (BLOCK_SIZE - 11)
 
 #define JOB PART
 
 bool start_mult = false;
-bool *d_sm;
-bool *h_sm;
+bool done[JOB] = {0};
 
-__global__ void clear_sm(bool * sm){
-    for(int i = 0; i < MAX_SM; i++){
-        sm[i] = false;
-    }
-}
-
-__global__ void gpu_matrix_mult(int *a,int *b, int *c, bool *sm)
+__global__ void gpu_matrix_mult(int *a,int *b, int *c)
 {
-    if(threadIdx.x == 0 && threadIdx.y == 0)
-        sm[__mysmid()] = true;
-
     int row = blockIdx.y * blockDim.y + threadIdx.y; 
     while(row < N){
         int col = blockIdx.x * blockDim.x + threadIdx.x;
@@ -67,15 +56,17 @@ __global__ void gpu_make_rand_matrix(int * mat, unsigned int seed){
 void *thread_main(void * arg){
     unsigned int seed = *((unsigned int*)arg);
 
-    clock_t start, end;
-
     // Cuda Event create
     float gpu_elapsed_time_ms;
 
-    cudaStream_t cuda_stream;
-    cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
-    //printf("Before Excution : %s\n", cudaGetErrorName(cudaGetLastError()));
+    cudaStream_t cuda_stream;
+    cudaStreamCreate(&cuda_stream);
+    //cudaStreamCreateWithFlags(&cuda_stream, cudaStreamNonBlocking);
+
 
     // Device matrices memory allocation
     int *device_mat1, *device_mat2, *device_result;
@@ -87,26 +78,31 @@ void *thread_main(void * arg){
     gpu_make_rand_matrix<<< 1, 1 >>>(device_mat1, seed);
     gpu_make_rand_matrix<<< 1, 1 >>>(device_mat2, seed);
 
-    dim3 dimGrid(GRID_SIZE, GRID_SIZE);
+    // Set the grid
+    unsigned int grid_rows = 11;
+    unsigned int gridevice_resultols = 11;
+
+    dim3 dimGrid(gridevice_resultols, grid_rows);
     dim3 dimBlock(BLOCK_SIZE, BLOCK_SIZE);
 
     while(!start_mult);
 
 	//--------------------------------------GPU Computing Start--------------------------------------------//
 
-    start = clock();   
+    cudaEventRecord(start, 0);
+   
+    gpu_matrix_mult<<<dimGrid, dimBlock, 0, cuda_stream >>>(device_mat1, device_mat2, device_result);
+    cudaDeviceSynchronize();
+    cudaEventRecord(stop, 0);
+    cudaEventSynchronize(stop);
 
-    gpu_matrix_mult<<< dimGrid, dimBlock, 0, cuda_stream >>>(device_mat1, device_mat2, device_result, d_sm);
     cudaDeviceSynchronize();
 
-    end = clock();
-
-    gpu_elapsed_time_ms = (float)(end - start) / (CLOCKS_PER_SEC / 1000);
+    cudaEventElapsedTime(&gpu_elapsed_time_ms, start, stop);
     printf("Time elapsed on matrix multiplication of %dx%d . %dx%d on GPU: %f ms.\n\n", N, N, N, N, gpu_elapsed_time_ms);
 
 	//--------------------------------------GPU Computing End--------------------------------------------//
 
-    printf("After Excution : %s\n", cudaGetErrorName(cudaGetLastError()));
 
     // free memory
     cudaFree(device_mat1);
@@ -128,14 +124,10 @@ int main(int argc, char const *argv[])
     printf("%d Parts\n", PART);
 	printf("THREAD PER JOB : %d, THREAD BLOCK PER JOB : %d\n", THREAD_PER_JOB, THREAD_BLOCK_PER_JOB);
 
-    h_sm = (bool *)calloc(MAX_SM, sizeof(bool));
-    cudaMalloc((void **) &d_sm, sizeof(bool)*MAX_SM);
-
-    clear_sm<<< 1, 1 >>>(d_sm);
-
     for(int i = 0; i < JOB; i++){
+        done[i] = false;
         pthread_create(&threads[i], NULL, &thread_main, (void *)&seed);
-        printf("%d / %d thread starts\n", i + 1, JOB);
+        printf("%d / %d thread starts\n", i, JOB);
     }
 
     start_mult = true;
@@ -143,25 +135,13 @@ int main(int argc, char const *argv[])
     for(int i = 0; i < JOB; i++){
         err = pthread_join(threads[i], (void **)&status);
         if(err == 0){
-            printf("Completed join with thread %d status : %d\n", i + 1, status);
+            printf("Completed join with thread %d status : %d\n", i, status);
         }
         else{
-            printf("ERROR: return code from pthread_join() is %d, thread %d\n", err, i + 1);
+            printf("ERROR: return code from pthread_join() is %d, thread %d\n", err, i);
             return -1;
         }
     }
-
-    cudaMemcpy(h_sm, d_sm, sizeof(bool)*MAX_SM, cudaMemcpyDeviceToHost);
-
-    int count = 0;
-    for(int i = 0; i < MAX_SM; i++){
-        if(h_sm[i] == false){
-            //printf("%dth sm is not used!!!\n", i + 1);
-            count++;
-        }
-    }
-
-    printf("Unused SM : %d\n", count);
 
     return 0;
 }
